@@ -333,7 +333,7 @@ impl Endpoint {
 
     /// Create a channel from this config.
     pub async fn connect(&self) -> Result<Channel, Error> {
-        let mut http = hyper::client::connect::HttpConnector::new();
+        let mut http = hyper_util::client::legacy::connect::HttpConnector::new();
         http.enforce_http(false);
         http.set_nodelay(self.tcp_nodelay);
         http.set_keepalive(self.tcp_keepalive);
@@ -354,7 +354,7 @@ impl Endpoint {
     /// The channel returned by this method does not attempt to connect to the endpoint until first
     /// use.
     pub fn connect_lazy(&self) -> Channel {
-        let mut http = hyper::client::connect::HttpConnector::new();
+        let mut http = hyper_util::client::legacy::connect::HttpConnector::new();
         http.enforce_http(false);
         http.set_nodelay(self.tcp_nodelay);
         http.set_keepalive(self.tcp_keepalive);
