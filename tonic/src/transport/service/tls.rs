@@ -15,6 +15,13 @@ use crate::transport::{
     server::{Connected, TlsStream},
     Certificate, Identity,
 };
+use hyper_util::rt::TokioIo;
+use std::{fmt, sync::Arc};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::{
+    rustls::{ClientConfig, RootCertStore, ServerConfig, ServerName},
+    TlsAcceptor as RustlsAcceptor, TlsConnector as RustlsConnector,
+};
 
 /// h2 alpn in plain format for rustls.
 const ALPN_H2: &[u8] = b"h2";
@@ -80,14 +87,18 @@ impl TlsConnector {
 
         // Generally we require ALPN to be negotiated, but if the user has
         // explicitly set `assume_http2` to true, we'll allow it to be missing.
-        let (_, session) = io.get_ref();
-        let alpn_protocol = session.alpn_protocol();
-        if alpn_protocol != Some(ALPN_H2) {
-            if alpn_protocol.is_some() || !self.assume_http2 {
-                return Err(TlsError::H2NotNegotiated.into());
-            }
-        }
-        Ok(BoxedIo::new(io))
+        let assume_http2 = self.assume_http2;
+
+        Ok({
+            let (_, session) = io.get_ref();
+
+            match session.alpn_protocol() {
+                Some(b) if b == b"h2" => (),
+                _ if !assume_http2 => return Err(TlsError::H2NotNegotiated.into()),
+            };
+
+            BoxedIo::new(TokioIo::new(io))
+        })
     }
 }
 
