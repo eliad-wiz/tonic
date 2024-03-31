@@ -1,3 +1,4 @@
+use super::executor;
 use super::{grpc_timeout::GrpcTimeout, reconnect::Reconnect, AddOrigin, UserAgent};
 use crate::transport::{BoxFuture, Endpoint};
 use http::Uri;
@@ -30,7 +31,7 @@ impl Connection {
         C::Future: Unpin + Send,
         C::Response: rt::Read + rt::Write + Unpin + Send + 'static,
     {
-        let mut settings: Builder<super::SharedExec> = Builder::new(endpoint.executor)
+        let mut settings: Builder<super::SharedExec> = Builder::new(endpoint.executor.clone())
             .initial_stream_window_size(endpoint.init_stream_window_size)
             .initial_connection_window_size(endpoint.init_connection_window_size)
             .keep_alive_interval(endpoint.http2_keep_alive_interval)
@@ -60,7 +61,7 @@ impl Connection {
             .option_layer(endpoint.rate_limit.map(|(l, d)| RateLimitLayer::new(l, d)))
             .into_inner();
 
-        let make_service = MakeSendRequestService::new(connector, endpoint, settings);
+        let make_service = MakeSendRequestService::new(connector, endpoint.clone(), settings);
 
         let conn = Reconnect::new(make_service, endpoint.uri.clone(), is_lazy);
 
@@ -181,17 +182,19 @@ where
 
     fn call(&mut self, req: Uri) -> Self::Future {
         let fut = self.connector.call(req);
+        let mut builder = Builder::new(self.endpoint.executor.clone());
+        builder
+            .initial_stream_window_size(self.endpoint.init_stream_window_size)
+            .initial_connection_window_size(self.endpoint.init_connection_window_size)
+            .keep_alive_interval(self.endpoint.http2_keep_alive_interval);
+        let executor = self.endpoint.executor.clone();
+
         Box::pin(async move {
             let io = fut.await.map_err(Into::into)?;
-            let (send_request, conn) = Builder::new(self.endpoint.executor)
-                .initial_stream_window_size(self.endpoint.init_stream_window_size)
-                .initial_connection_window_size(self.endpoint.init_connection_window_size)
-                .keep_alive_interval(self.endpoint.http2_keep_alive_interval)
-                .handshake(io)
-                .await?;
+            let (send_request, conn) = builder.handshake(io).await?;
 
             Executor::<BoxFuture<'static, ()>>::execute(
-                &self.endpoint.executor,
+                &executor,
                 Box::pin(async move {
                     if let Err(e) = conn.await {
                         tracing::debug!("connection task error: {:?}", e);

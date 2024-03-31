@@ -13,12 +13,19 @@ pub use super::service::Routes;
 pub use super::service::RoutesBuilder;
 
 pub use conn::{Connected, TcpConnectInfo};
+use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 #[cfg(feature = "tls")]
 pub use tls::ServerTlsConfig;
 
 #[cfg(feature = "tls")]
 pub use conn::TlsConnectInfo;
+
+use tokio_stream::StreamExt as _;
+use tower::util::BoxCloneService;
+use tower::util::Oneshot;
+use tower::ServiceExt;
+use tracing::trace;
 
 #[cfg(feature = "tls")]
 use super::service::TlsAcceptor;
@@ -43,6 +50,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Body;
 use pin_project::pin_project;
+use std::future::poll_fn;
 use std::{
     convert::Infallible,
     fmt,
@@ -64,7 +72,8 @@ use tower::{
     Service, ServiceBuilder,
 };
 
-type BoxService = tower::util::BoxService<Request, Response, crate::Error>;
+type BoxError = crate::Error;
+type BoxService = tower::util::BoxCloneService<Request, Response, crate::Error>;
 type TraceInterceptor = Arc<dyn Fn(&Request<()>) -> tracing::Span + Send + Sync + 'static>;
 
 const DEFAULT_HTTP2_KEEPALIVE_TIMEOUT_SECS: u64 = 20;
@@ -496,14 +505,14 @@ impl<L> Server<L> {
         L: Layer<S>,
         L::Service: Service<Request, Response = Response<ResBody>> + Clone + Send + 'static,
         <<L as Layer<S>>::Service as Service<Request>>::Future: Send + 'static,
-        <<L as Layer<S>>::Service as Service<Request>>::Error: Into<crate::Error> + Send,
+        <<L as Layer<S>>::Service as Service<Request>>::Error: Into<crate::Error> + Send + 'static,
         I: Stream<Item = Result<IO, IE>>,
         IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
         IO::ConnectInfo: Clone + Send + Sync + 'static,
-        IE: Into<crate::Error>,
+        IE: Into<BoxError>,
         F: Future<Output = ()>,
         ResBody: Body<Data = Bytes> + Send + 'static,
-        ResBody::Error: Into<crate::Error>,
+        ResBody::Error: Into<BoxError>,
     {
         let trace_interceptor = self.trace_interceptor.clone();
         let concurrency_limit = self.concurrency_limit;
@@ -512,6 +521,8 @@ impl<L> Server<L> {
         let max_concurrent_streams = self.max_concurrent_streams;
         let timeout = self.timeout;
         let max_frame_size = self.max_frame_size;
+
+        // FIXME: this requires additonal implementation here.
         let http2_only = !self.accept_http1;
 
         let http2_keepalive_interval = self.http2_keepalive_interval;
@@ -519,13 +530,14 @@ impl<L> Server<L> {
             .http2_keepalive_timeout
             .unwrap_or_else(|| Duration::new(DEFAULT_HTTP2_KEEPALIVE_TIMEOUT_SECS, 0));
         let http2_adaptive_window = self.http2_adaptive_window;
+
         let http2_max_pending_accept_reset_streams = self.http2_max_pending_accept_reset_streams;
 
-        let svc = self.service_builder.service(svc);
+        let make_service = self.service_builder.service(svc);
 
         let incoming = incoming::tcp_incoming(incoming, self);
-        let svc = MakeSvc {
-            inner: svc,
+        let mut make_service = MakeSvc {
+            inner: make_service,
             concurrency_limit,
             timeout,
             trace_interceptor,
@@ -543,13 +555,111 @@ impl<L> Server<L> {
             .keep_alive_timeout(http2_keepalive_timeout)
             .adaptive_window(http2_adaptive_window.unwrap_or_default())
             // FIXME: wait for this to be added to hyper-util
-            //.max_pending_accept_reset_streams(http2_max_pending_accept_reset_streams)
+            // .max_pending_accept_reset_streams(http2_max_pending_accept_reset_streams)
             .max_frame_size(max_frame_size);
 
-        let io = TokioIo::new(incoming);
-        let connection = builder.serve_connection(io, svc);
+        tokio::pin!(incoming);
+
+        loop {
+            let io = match incoming
+                .try_next()
+                .await
+                .map_err(super::Error::from_source)?
+            {
+                Some(io) => io,
+                None => break,
+            };
+
+            trace!("connection accepted");
+
+            poll_fn(|cx| make_service.poll_ready(cx))
+                .await
+                .map_err(super::Error::from_source)?;
+
+            let req_svc = make_service
+                .call(&io)
+                .await
+                .map_err(super::Error::from_source)?;
+            let hyper_svc = TowerToHyperService::new(req_svc);
+
+            let builder = builder.clone();
+            serve_connection(io, hyper_svc, builder)
+        }
 
         Ok(())
+    }
+}
+
+fn serve_connection<IO>(
+    io: ServerIo<IO>,
+    hyper_svc: TowerToHyperService<BoxService>,
+    builder: hyper_util::server::conn::auto::Builder<TokioExecutor>,
+) where
+    IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+    IO::ConnectInfo: Clone + Send + Sync + 'static,
+{
+    tokio::spawn(async move {
+        if let Err(err) = builder
+            .serve_connection_with_upgrades(TokioIo::new(io), hyper_svc)
+            .await
+        {
+            trace!("failed serving connection: {:#}", err);
+        }
+
+        trace!("connection closed");
+    });
+}
+
+#[derive(Debug, Copy, Clone)]
+struct TowerToHyperService<S> {
+    service: S,
+}
+
+impl<S> TowerToHyperService<S> {
+    fn new(service: S) -> Self {
+        Self { service }
+    }
+}
+
+impl<S> hyper::service::Service<Request<Incoming>> for TowerToHyperService<S>
+where
+    S: tower_service::Service<Request> + Clone,
+    S::Error: Into<BoxError> + 'static,
+{
+    type Response = S::Response;
+    type Error = super::Error;
+    type Future = TowerToHyperServiceFuture<S, Request>;
+
+    fn call(&self, req: Request<Incoming>) -> Self::Future {
+        let req = req.map(axum::body::Body::new);
+        TowerToHyperServiceFuture {
+            future: self.service.clone().oneshot(req),
+        }
+    }
+}
+
+#[pin_project]
+struct TowerToHyperServiceFuture<S, R>
+where
+    S: tower_service::Service<R>,
+{
+    #[pin]
+    future: Oneshot<S, R>,
+}
+
+impl<S, R> Future for TowerToHyperServiceFuture<S, R>
+where
+    S: tower_service::Service<R>,
+    S::Error: Into<BoxError> + 'static,
+{
+    type Output = Result<S::Response, super::Error>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.project()
+            .future
+            .poll(cx)
+            .map_err(super::Error::from_source)
     }
 }
 
@@ -607,7 +717,7 @@ impl<L> Router<L> {
     /// [tokio]: https://docs.rs/tokio
     pub async fn serve<ResBody>(self, addr: SocketAddr) -> Result<(), super::Error>
     where
-        L: Layer<Routes>,
+        L: Layer<Routes> + Clone,
         L::Service: Service<Request, Response = Response<ResBody>> + Clone + Send + 'static,
         <<L as Layer<Routes>>::Service as Service<Request>>::Future: Send + 'static,
         <<L as Layer<Routes>>::Service as Service<Request>>::Error: Into<crate::Error> + Send,
@@ -733,6 +843,7 @@ impl<L> fmt::Debug for Server<L> {
     }
 }
 
+#[derive(Clone)]
 struct Svc<S> {
     inner: S,
     trace_interceptor: Option<TraceInterceptor>,
@@ -796,7 +907,8 @@ where
         let _guard = this.span.enter();
 
         let response: Response<ResBody> = ready!(this.inner.poll(cx)).map_err(Into::into)?;
-        let response = response.map(|body| body.map_err(Into::into).boxed_unsync());
+        let response =
+            response.map(|body| axum::body::Body::new(body.map_err(Into::into).boxed_unsync()));
         Poll::Ready(Ok(response))
     }
 }
@@ -807,6 +919,7 @@ impl<S> fmt::Debug for Svc<S> {
     }
 }
 
+#[derive(Clone)]
 struct MakeSvc<S, IO> {
     concurrency_limit: Option<usize>,
     timeout: Option<Duration>,
@@ -847,7 +960,7 @@ where
             .service(svc);
 
         let svc = ServiceBuilder::new()
-            .layer(BoxService::layer())
+            .layer(BoxCloneService::layer())
             .map_request(move |mut request: Request| {
                 match &conn_info {
                     tower::util::Either::A(inner) => {
