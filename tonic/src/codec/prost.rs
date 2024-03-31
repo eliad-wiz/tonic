@@ -157,6 +157,7 @@ mod tests {
     use bytes::{Buf, BufMut, BytesMut};
     use http_body::Body;
     use std::pin::pin;
+    use http_body_util::BodyExt as _;
 
     const LEN: usize = 10000;
     // The maximum uncompressed size in bytes for a message. Set to 2MB.
@@ -238,7 +239,8 @@ mod tests {
             None,
         ));
 
-        while let Some(r) = body.data().await {
+
+        while let Some(r) = body.frame().await {
             r.unwrap();
         }
     }
@@ -258,14 +260,18 @@ mod tests {
             None,
             SingleMessageCompressionOverride::default(),
             Some(MAX_MESSAGE_SIZE),
-        ));
+        );
 
-        assert!(body.data().await.is_none());
+        tokio::pin!(body);
+        let frame = body
+            .frame()
+            .await
+            .expect("no error polling frame")
+            .expect("at least one frame");
         assert_eq!(
-            body.trailers()
-                .await
-                .expect("no error polling trailers")
-                .expect("some trailers")
+            frame
+                .into_trailers()
+                .expect("got trailers")
                 .get("grpc-status")
                 .expect("grpc-status header"),
             "11"
@@ -292,15 +298,20 @@ mod tests {
             Some(usize::MAX),
         ));
 
-        assert!(body.data().await.is_none());
+        tokio::pin!(body);
+
+        let frame = body
+            .frame()
+            .await
+            .expect("no error polling frame")
+            .expect("at least one frame");
         assert_eq!(
-            body.trailers()
-                .await
-                .expect("no error polling trailers")
-                .expect("some trailers")
+            frame
+                .into_trailers()
+                .expect("got trailers")
                 .get("grpc-status")
                 .expect("grpc-status header"),
-            "8"
+            "11"
         );
         assert!(body.is_end_stream());
     }
@@ -395,7 +406,7 @@ mod tests {
                     };
                     // make some fake progress
                     self.count += 1;
-                    result
+                    result.map(|opt| opt.map(|res| res.map(|data| Frame::data(data))))
                 } else {
                     Poll::Ready(None)
                 }

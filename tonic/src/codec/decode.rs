@@ -257,9 +257,18 @@ impl StreamingInner {
             None => None,
         };
 
-        Poll::Ready(if let Some(data) = chunk {
-            self.buf.put(data);
-            Ok(Some(()))
+        Poll::Ready(if let Some(frame) = chunk {
+            match frame.into_data() {
+                Ok(data) => {
+                    self.buf.put(data);
+                    Ok(Some(()))
+                }
+                //TODO: check if we need to handle trailers here
+                Err(e) => Err(Status::new(
+                    Code::Internal,
+                    format!("Error decoding body, expected data, got trailers: {:?}", e),
+                )),
+            }
         } else {
             // FIXME: improve buf usage.
             if self.buf.has_remaining() {
@@ -276,21 +285,36 @@ impl StreamingInner {
 
     fn poll_response(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Status>> {
         if let Direction::Response(status) = self.direction {
-            match ready!(Pin::new(&mut self.body).poll_trailers(cx)) {
+            let frame = match ready!(Pin::new(&mut self.body).poll_frame(cx)) {
+                Some(Ok(frame)) => frame,
+                Some(Err(status)) => {
+                    debug!("decoder inner trailers error: {:?}", status);
+                    return Poll::Ready(Err(status));
+                }
+                None => {
+                    self.trailers = None;
+                    return Poll::Ready(Ok(()));
+                }
+            };
+
+            match frame.into_trailers() {
                 Ok(trailer) => {
-                    if let Err(e) = crate::status::infer_grpc_status(trailer.as_ref(), status) {
+                    if let Err(e) = crate::status::infer_grpc_status(Some(&trailer), status) {
                         if let Some(e) = e {
                             return Poll::Ready(Err(e));
                         } else {
                             return Poll::Ready(Ok(()));
                         }
                     } else {
-                        self.trailers = trailer.map(MetadataMap::from_headers);
+                        self.trailers = Some(MetadataMap::from_headers(trailer));
                     }
                 }
-                Err(status) => {
-                    debug!("decoder inner trailers error: {:?}", status);
-                    return Poll::Ready(Err(status));
+                Err(frame) => {
+                    debug!("decoder expected trailers, found data: {:?}", frame);
+                    return Poll::Ready(Err(Status::new(
+                        Code::Internal,
+                        "expected trailers, found data".to_string(),
+                    )));
                 }
             }
         }
@@ -368,11 +392,16 @@ impl<T> Streaming<T> {
 
         // Trailers were not caught during poll_next and thus lets poll for
         // them manually.
-        let map = future::poll_fn(|cx| Pin::new(&mut self.inner.body).poll_trailers(cx))
+        let map = future::poll_fn(|cx| Pin::new(&mut self.inner.body).poll_frame(cx))
             .await
-            .map_err(|e| Status::from_error(Box::new(e)));
+            .map(|r| match r {
+                Ok(frame) => Ok(frame
+                    .into_trailers()
+                    .expect("more data left to poll while trying to poll trailers")),
+                Err(e) => Err(Status::from_error(Box::new(e))),
+            });
 
-        map.map(|x| x.map(MetadataMap::from_headers))
+        map.map(|x| x.map(MetadataMap::from_headers)).transpose()
     }
 
     fn decode_chunk(&mut self) -> Result<Option<T>, Status> {
