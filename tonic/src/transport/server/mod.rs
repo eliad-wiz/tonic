@@ -583,18 +583,26 @@ impl<L> Server<L> {
             let hyper_svc = TowerToHyperService::new(req_svc);
 
             let builder = builder.clone();
-            serve_connection(io, hyper_svc, builder)
+            serve_connection(io, hyper_svc, builder);
         }
 
         Ok(())
     }
 }
 
-fn serve_connection<IO>(
+// This is moved to its own function as a way to get around
+// https://github.com/rust-lang/rust/issues/102211
+fn serve_connection<IO, S>(
     io: ServerIo<IO>,
-    hyper_svc: TowerToHyperService<BoxService>,
+    hyper_svc: TowerToHyperService<S>,
     builder: hyper_util::server::conn::auto::Builder<TokioExecutor>,
 ) where
+    S: Service<Request<axum::body::Body>, Response = Response<axum::body::Body>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    S::Error: Into<BoxError> + Send,
     IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
     IO::ConnectInfo: Clone + Send + Sync + 'static,
 {
