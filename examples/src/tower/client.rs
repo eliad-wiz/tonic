@@ -59,7 +59,7 @@ mod service {
     }
 
     impl Service<Request<BoxBody>> for AuthSvc {
-        type Response = Response<Body>;
+        type Response = Response<BoxBody>;
         type Error = Box<dyn std::error::Error + Send + Sync>;
         #[allow(clippy::type_complexity)]
         type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;

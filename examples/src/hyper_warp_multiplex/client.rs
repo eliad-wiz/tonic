@@ -1,3 +1,5 @@
+//! IMPORTANT: warp is not compatible with hyper-1.0, this example will not
+//! compile until warp is updated to support hyper-1.0.
 //! To hit the gRPC endpoint you must run this client via:
 //! `cargo run --bin hyper-warp-multiplex-client
 //! To hit the warp server you can run this command:
