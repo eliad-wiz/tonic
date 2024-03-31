@@ -5,7 +5,7 @@ use std::task::{ready, Context, Poll};
 use base64::Engine as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{header, HeaderMap, HeaderName, HeaderValue};
-use http_body::{Body, SizeHint};
+use http_body::{Body, Frame, SizeHint};
 use pin_project::pin_project;
 use tokio_stream::Stream;
 use tonic::Status;
@@ -163,29 +163,41 @@ where
     fn poll_decode(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<B::Data, Status>>> {
+    ) -> Poll<Option<Result<Frame<B::Data>, Status>>> {
         match self.encoding {
             Encoding::Base64 => loop {
                 if let Some(bytes) = self.as_mut().decode_chunk()? {
-                    return Poll::Ready(Some(Ok(bytes)));
+                    return Poll::Ready(Some(Ok(Frame::data(bytes))));
                 }
 
                 let mut this = self.as_mut().project();
 
-                match ready!(this.inner.as_mut().poll_data(cx)) {
-                    Some(Ok(data)) => this.buf.put(data),
+                match ready!(this.inner.as_mut().poll_frame(cx)) {
+                    Some(Ok(frame)) if frame.is_data() => this.buf.put(frame.into_data().unwrap()),
+                    Some(Ok(frame)) if frame.is_trailers() => {
+                        return Poll::Ready(Some(Err(internal_error(
+                            "malformed base64 request has unencoded trailers",
+                        ))))
+                    }
+                    Some(Ok(_)) => {
+                        unreachable!("unexpected frame type")
+                    }
                     Some(Err(e)) => return Poll::Ready(Some(Err(internal_error(e)))),
                     None => {
                         return if this.buf.has_remaining() {
                             Poll::Ready(Some(Err(internal_error("malformed base64 request"))))
                         } else {
-                            Poll::Ready(None)
+                            if let Some(trailers) = this.trailers.take() {
+                                Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+                            } else {
+                                Poll::Ready(None)
+                            }
                         }
                     }
                 }
             },
 
-            Encoding::None => match ready!(self.project().inner.poll_data(cx)) {
+            Encoding::None => match ready!(self.project().inner.poll_frame(cx)) {
                 Some(res) => Poll::Ready(Some(res.map_err(internal_error))),
                 None => Poll::Ready(None),
             },
@@ -195,37 +207,32 @@ where
     fn poll_encode(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<B::Data, Status>>> {
+    ) -> Poll<Option<Result<Frame<B::Data>, Status>>> {
         let mut this = self.as_mut().project();
 
-        if let Some(mut res) = ready!(this.inner.as_mut().poll_data(cx)) {
-            if *this.encoding == Encoding::Base64 {
-                res = res.map(|b| crate::util::base64::STANDARD.encode(b).into())
-            }
+        match ready!(this.inner.as_mut().poll_frame(cx)) {
+            Some(Ok(frame)) if frame.is_data() => {
+                let mut res = frame.into_data().unwrap();
 
-            return Poll::Ready(Some(res.map_err(internal_error)));
-        }
-
-        // this flag is needed because the inner stream never
-        // returns Poll::Ready(None) when polled for trailers
-        if *this.poll_trailers {
-            return match ready!(this.inner.poll_trailers(cx)) {
-                Ok(Some(map)) => {
-                    let mut frame = make_trailers_frame(map);
-
-                    if *this.encoding == Encoding::Base64 {
-                        frame = crate::util::base64::STANDARD.encode(frame).into_bytes();
-                    }
-
-                    *this.poll_trailers = false;
-                    Poll::Ready(Some(Ok(frame.into())))
+                if *this.encoding == Encoding::Base64 {
+                    let mut buf = BytesMut::with_capacity(res.len());
+                    buf.put_slice(&res);
+                    res = crate::util::base64::STANDARD.encode(buf).into();
                 }
-                Ok(None) => Poll::Ready(None),
-                Err(e) => Poll::Ready(Some(Err(internal_error(e)))),
-            };
-        }
 
-        Poll::Ready(None)
+                Poll::Ready(Some(Ok(Frame::data(res))))
+            }
+            Some(Ok(frame)) => {
+                let trailers = frame.into_trailers().expect("must be trailers");
+                let mut frame = make_trailers_frame(trailers);
+                if *this.encoding == Encoding::Base64 {
+                    frame = crate::util::base64::STANDARD.encode(frame).into_bytes();
+                }
+                Poll::Ready(Some(Ok(Frame::data(frame.into()))))
+            }
+            Some(Err(e)) => Poll::Ready(Some(Err(internal_error(e)))),
+            None => Poll::Ready(None),
+        }
     }
 }
 
@@ -237,16 +244,24 @@ where
     type Data = Bytes;
     type Error = Status;
 
-    fn poll_data(
+    fn poll_frame(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
         if self.client && self.direction == Direction::Decode {
             let mut me = self.as_mut();
 
             loop {
                 let incoming_buf = match ready!(me.as_mut().poll_decode(cx)) {
-                    Some(Ok(incoming_buf)) => incoming_buf,
+                    Some(Ok(incoming_buf)) if incoming_buf.is_data() => {
+                        incoming_buf.into_data().unwrap()
+                    }
+                    Some(Ok(incoming_buf)) if incoming_buf.is_trailers() => {
+                        let trailers = incoming_buf.into_trailers().unwrap();
+                        me.as_mut().project().trailers.replace(trailers);
+                        continue;
+                    }
+                    Some(Ok(_)) => unreachable!("unexpected frame type"),
                     None => {
                         // TODO: Consider eofing here?
                         // Even if the buffer has more data, this will hit the eof branch
@@ -273,13 +288,15 @@ where
                         }
 
                         if msg_buf.has_remaining() {
-                            Poll::Ready(Some(Ok(msg_buf)))
+                            Poll::Ready(Some(Ok(Frame::data(msg_buf))))
                         } else {
                             Poll::Ready(None)
                         }
                     }
                     FindTrailers::IncompleteBuf => continue,
-                    FindTrailers::Done(len) => Poll::Ready(Some(Ok(buf.split_to(len).freeze()))),
+                    FindTrailers::Done(len) => {
+                        Poll::Ready(Some(Ok(Frame::data(buf.split_to(len).freeze()))))
+                    }
                 };
             }
         }
@@ -289,14 +306,6 @@ where
             Direction::Encode => self.poll_encode(cx),
             Direction::Empty => Poll::Ready(None),
         }
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap<HeaderValue>>, Self::Error>> {
-        let trailers = self.project().trailers.take();
-        Poll::Ready(Ok(trailers))
     }
 
     fn is_end_stream(&self) -> bool {
@@ -313,10 +322,10 @@ where
     B: Body<Data = Bytes>,
     B::Error: Error,
 {
-    type Item = Result<Bytes, Status>;
+    type Item = Result<Frame<Bytes>, Status>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Body::poll_data(self, cx)
+        self.poll_frame(cx)
     }
 }
 
