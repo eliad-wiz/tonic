@@ -1,5 +1,5 @@
-use super::executor;
 use super::{grpc_timeout::GrpcTimeout, reconnect::Reconnect, AddOrigin, UserAgent};
+use crate::body::{boxed, BoxBody};
 use crate::transport::{BoxFuture, Endpoint};
 use http::Uri;
 use hyper::rt;
@@ -17,8 +17,8 @@ use tower::{
 };
 use tower_service::Service;
 
-pub(crate) type Request = axum::extract::Request;
-pub(crate) type Response = axum::response::Response;
+pub(crate) use crate::transport::{Request, Response};
+
 pub(crate) struct Connection {
     inner: BoxService<Request, Response, crate::Error>,
 }
@@ -120,17 +120,17 @@ impl fmt::Debug for Connection {
 }
 
 struct SendRequest {
-    inner: hyper::client::conn::http2::SendRequest<axum::body::Body>,
+    inner: hyper::client::conn::http2::SendRequest<BoxBody>,
 }
 
-impl From<hyper::client::conn::http2::SendRequest<axum::body::Body>> for SendRequest {
-    fn from(inner: hyper::client::conn::http2::SendRequest<axum::body::Body>) -> Self {
+impl From<hyper::client::conn::http2::SendRequest<BoxBody>> for SendRequest {
+    fn from(inner: hyper::client::conn::http2::SendRequest<BoxBody>) -> Self {
         Self { inner }
     }
 }
 
-impl tower::Service<http::Request<axum::body::Body>> for SendRequest {
-    type Response = http::Response<axum::body::Body>;
+impl tower::Service<http::Request<BoxBody>> for SendRequest {
+    type Response = http::Response<BoxBody>;
     type Error = crate::Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
@@ -138,13 +138,13 @@ impl tower::Service<http::Request<axum::body::Body>> for SendRequest {
         self.inner.poll_ready(cx).map_err(Into::into)
     }
 
-    fn call(&mut self, req: http::Request<axum::body::Body>) -> Self::Future {
+    fn call(&mut self, req: Request) -> Self::Future {
         let fut = self.inner.send_request(req);
 
         Box::pin(async move {
             fut.await
                 .map_err(Into::into)
-                .map(|res| res.map(|body| axum::body::Body::new(body)))
+                .map(|res| res.map(|body| boxed(body)))
         })
     }
 }

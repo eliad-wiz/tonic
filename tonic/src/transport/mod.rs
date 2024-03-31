@@ -122,5 +122,8 @@ pub use self::server::ServerTlsConfig;
 #[cfg(feature = "tls")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
 pub use self::tls::Identity;
+use crate::body::BoxBody;
 
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+pub(crate) type Response<B = BoxBody> = http::Response<B>;
+pub(crate) type Request<B = BoxBody> = http::Request<B>;

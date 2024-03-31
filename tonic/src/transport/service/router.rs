@@ -1,5 +1,4 @@
-use crate::server::NamedService;
-use axum::{extract::Request, response::Response};
+use crate::{body::boxed, server::NamedService, transport::BoxFuture};
 use pin_project::pin_project;
 use std::{
     convert::Infallible,
@@ -9,6 +8,8 @@ use std::{
     task::{ready, Context, Poll},
 };
 use tower_service::Service;
+
+use crate::transport::{Request, Response};
 
 /// A [`Service`] router.
 #[derive(Debug, Default, Clone)]
@@ -71,9 +72,10 @@ impl Routes {
         S::Future: Send + 'static,
         S::Error: Into<crate::Error> + Send,
     {
-        self.router = self
-            .router
-            .route_service(&format!("/{}/*rest", S::NAME), svc);
+        self.router = self.router.route_service(
+            &format!("/{}/*rest", S::NAME),
+            AxumBodyService { service: svc },
+        );
         self
     }
 
@@ -126,8 +128,35 @@ impl Future for RoutesFuture {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match ready!(self.project().0.poll(cx)) {
-            Ok(res) => Ok(res).into(),
+            Ok(res) => Ok(res.map(boxed)).into(),
             Err(err) => match err {},
         }
+    }
+}
+
+#[derive(Clone)]
+struct AxumBodyService<S> {
+    service: S,
+}
+
+impl<S> Service<Request<axum::body::Body>> for AxumBodyService<S>
+where
+    S: Service<Request, Response = Response, Error = Infallible> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = Response<axum::body::Body>;
+    type Error = Infallible;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.service.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request<axum::body::Body>) -> Self::Future {
+        let fut = self.service.call(req.map(|body| boxed(body)));
+        Box::pin(async move {
+            fut.await
+                .map(|res| res.map(|body| axum::body::Body::new(body)))
+        })
     }
 }

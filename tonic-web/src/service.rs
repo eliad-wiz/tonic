@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
 use http::{header, HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Version};
-use hyper::Body;
+use hyper::body::Incoming;
 use pin_project::pin_project;
 use tonic::{
     body::{empty_body, BoxBody},
@@ -50,7 +50,7 @@ impl<S> GrpcWebService<S> {
 
 impl<S> GrpcWebService<S>
 where
-    S: Service<Request<Body>, Response = Response<BoxBody>> + Send + 'static,
+    S: Service<Request<Incoming>, Response = Response<BoxBody>> + Send + 'static,
 {
     fn response(&self, status: StatusCode) -> ResponseFuture<S::Future> {
         ResponseFuture {
@@ -66,9 +66,9 @@ where
     }
 }
 
-impl<S> Service<Request<Body>> for GrpcWebService<S>
+impl<S> Service<Request<Incoming>> for GrpcWebService<S>
 where
-    S: Service<Request<Body>, Response = Response<BoxBody>> + Send + 'static,
+    S: Service<Request<Incoming>, Response = Response<BoxBody>> + Send + 'static,
     S::Future: Send + 'static,
     S::Error: Into<BoxError> + Send,
 {
@@ -80,7 +80,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: Request<Body>) -> Self::Future {
+    fn call(&mut self, req: Request<Incoming>) -> Self::Future {
         match RequestKind::new(req.headers(), req.method(), req.version()) {
             // A valid grpc-web request, regardless of HTTP version.
             //
@@ -202,7 +202,10 @@ impl<'a> RequestKind<'a> {
 // Mutating request headers to conform to a gRPC request is not really
 // necessary for us at this point. We could remove most of these except
 // maybe for inserting `header::TE`, which tonic should check?
-fn coerce_request(mut req: Request<Body>, encoding: Encoding) -> Request<Body> {
+fn coerce_request(
+    mut req: Request<Incoming>,
+    encoding: Encoding,
+) -> Request<GrpcWebCall<Incoming>> {
     req.headers_mut().remove(header::CONTENT_LENGTH);
 
     req.headers_mut()
@@ -217,7 +220,6 @@ fn coerce_request(mut req: Request<Body>, encoding: Encoding) -> Request<Body> {
     );
 
     req.map(|b| GrpcWebCall::request(b, encoding))
-        .map(Body::wrap_stream)
 }
 
 fn coerce_response(res: Response<BoxBody>, encoding: Encoding) -> Response<BoxBody> {

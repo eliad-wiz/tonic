@@ -38,14 +38,15 @@ pub use incoming::TcpIncoming;
 #[cfg(feature = "tls")]
 pub(crate) use tokio_rustls::server::TlsStream;
 
+use crate::body::boxed;
+use crate::body::BoxBody;
 #[cfg(feature = "tls")]
 use crate::transport::Error;
 
 use self::recover_error::RecoverError;
 use super::service::{GrpcTimeout, ServerIo};
+use super::{Request, Response};
 use crate::server::NamedService;
-use axum::extract::Request;
-use axum::response::Response;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Body;
@@ -597,10 +598,7 @@ fn serve_connection<IO, S>(
     hyper_svc: TowerToHyperService<S>,
     builder: hyper_util::server::conn::auto::Builder<TokioExecutor>,
 ) where
-    S: Service<Request<axum::body::Body>, Response = Response<axum::body::Body>>
-        + Clone
-        + Send
-        + 'static,
+    S: Service<Request, Response = Response> + Clone + Send + 'static,
     S::Future: Send + 'static,
     S::Error: Into<BoxError> + Send,
     IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
@@ -639,7 +637,7 @@ where
     type Future = TowerToHyperServiceFuture<S, Request>;
 
     fn call(&self, req: Request<Incoming>) -> Self::Future {
-        let req = req.map(axum::body::Body::new);
+        let req = req.map(crate::body::boxed);
         TowerToHyperServiceFuture {
             future: self.service.clone().oneshot(req),
         }
@@ -915,8 +913,7 @@ where
         let _guard = this.span.enter();
 
         let response: Response<ResBody> = ready!(this.inner.poll(cx)).map_err(Into::into)?;
-        let response =
-            response.map(|body| axum::body::Body::new(body.map_err(Into::into).boxed_unsync()));
+        let response = response.map(|body| boxed(body.map_err(Into::into)));
         Poll::Ready(Ok(response))
     }
 }

@@ -61,7 +61,7 @@ impl Body for MockBody {
     type Error = Status;
 
     fn poll_frame(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         if self.data.has_remaining() {

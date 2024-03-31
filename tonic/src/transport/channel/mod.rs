@@ -11,6 +11,7 @@ pub use tls::ClientTlsConfig;
 
 use super::service::{Connection, DynamicServiceStream, SharedExec};
 use crate::transport::Executor;
+use crate::transport::{Request, Response};
 use bytes::Bytes;
 use http::uri::{InvalidUri, Uri};
 use hyper_util::client::legacy::connect::Connection as HyperConnection;
@@ -23,7 +24,6 @@ use std::{
 };
 use tokio::sync::mpsc::{channel, Sender};
 
-use axum::{body::Body, extract::Request, response::Response};
 use hyper::rt;
 use tower::balance::p2c::Balance;
 use tower::{
@@ -204,7 +204,7 @@ impl Service<Request> for Channel {
         Service::poll_ready(&mut self.svc, cx).map_err(super::Error::from_source)
     }
 
-    fn call(&mut self, request: Request<Body>) -> Self::Future {
+    fn call(&mut self, request: Request) -> Self::Future {
         let inner = Service::call(&mut self.svc, request);
 
         ResponseFuture { inner }

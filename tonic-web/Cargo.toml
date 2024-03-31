@@ -18,15 +18,16 @@ version = "0.11.0"
 base64 = "0.21"
 bytes = "1"
 tokio-stream = "0.1"
-http = "0.2"
-http-body = "0.4"
-hyper = {version = "0.14", default-features = false, features = ["stream"]}
+http = "1.0"
+http-body = "1.0"
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false }
 pin-project = "1"
-tonic = {version = "0.11", path = "../tonic", default-features = false}
+tonic = { version = "0.11", path = "../tonic", default-features = false }
 tower-service = "0.3"
 tower-layer = "0.3"
 tower-http = { version = "0.4", features = ["cors"] }
 tracing = "0.1"
 
 [dev-dependencies]
-tokio = {version = "1", features = ["macros", "rt"]}
+tokio = { version = "1", features = ["macros", "rt"] }
