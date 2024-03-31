@@ -39,7 +39,6 @@ pub use incoming::TcpIncoming;
 pub(crate) use tokio_rustls::server::TlsStream;
 
 use crate::body::boxed;
-use crate::body::BoxBody;
 #[cfg(feature = "tls")]
 use crate::transport::Error;
 
@@ -617,12 +616,12 @@ fn serve_connection<IO, S>(
 }
 
 #[derive(Debug, Copy, Clone)]
-struct TowerToHyperService<S> {
+pub struct TowerToHyperService<S> {
     service: S,
 }
 
 impl<S> TowerToHyperService<S> {
-    fn new(service: S) -> Self {
+    pub fn new(service: S) -> Self {
         Self { service }
     }
 }
@@ -645,7 +644,7 @@ where
 }
 
 #[pin_project]
-struct TowerToHyperServiceFuture<S, R>
+pub struct TowerToHyperServiceFuture<S, R>
 where
     S: tower_service::Service<R>,
 {
