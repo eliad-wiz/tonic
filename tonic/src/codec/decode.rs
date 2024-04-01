@@ -122,9 +122,7 @@ impl<T> Streaming<T> {
             decoder: Box::new(decoder),
             inner: StreamingInner {
                 body: body
-                    .map_frame(|mut frame| {
-                        frame.map_data(|mut buf| buf.copy_to_bytes(buf.remaining()))
-                    })
+                    .map_frame(|frame| frame.map_data(|mut buf| buf.copy_to_bytes(buf.remaining())))
                     .map_err(|err| Status::map_error(err.into()))
                     .boxed_unsync(),
                 state: State::ReadHeader,

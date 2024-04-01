@@ -438,7 +438,6 @@ pub(crate) enum SanitizeHeaders {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::MetadataValue;
     use http::Uri;
 
     #[test]

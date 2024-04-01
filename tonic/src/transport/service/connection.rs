@@ -1,3 +1,4 @@
+use super::SharedExec;
 use super::{grpc_timeout::GrpcTimeout, reconnect::Reconnect, AddOrigin, UserAgent};
 use crate::body::{boxed, BoxBody};
 use crate::transport::{BoxFuture, Endpoint};
@@ -61,7 +62,8 @@ impl Connection {
             .option_layer(endpoint.rate_limit.map(|(l, d)| RateLimitLayer::new(l, d)))
             .into_inner();
 
-        let make_service = MakeSendRequestService::new(connector, endpoint.clone(), settings);
+        let make_service =
+            MakeSendRequestService::new(connector, endpoint.executor.clone(), settings);
 
         let conn = Reconnect::new(make_service, endpoint.uri.clone(), is_lazy);
 
@@ -151,15 +153,15 @@ impl tower::Service<http::Request<BoxBody>> for SendRequest {
 
 struct MakeSendRequestService<C> {
     connector: C,
-    endpoint: Endpoint,
+    executor: super::SharedExec,
     settings: Builder<super::SharedExec>,
 }
 
 impl<C> MakeSendRequestService<C> {
-    fn new(connector: C, endpoint: Endpoint, settings: Builder<super::SharedExec>) -> Self {
+    fn new(connector: C, executor: SharedExec, settings: Builder<super::SharedExec>) -> Self {
         Self {
             connector,
-            endpoint,
+            executor,
             settings,
         }
     }
@@ -182,12 +184,8 @@ where
 
     fn call(&mut self, req: Uri) -> Self::Future {
         let fut = self.connector.call(req);
-        let mut builder = Builder::new(self.endpoint.executor.clone());
-        builder
-            .initial_stream_window_size(self.endpoint.init_stream_window_size)
-            .initial_connection_window_size(self.endpoint.init_connection_window_size)
-            .keep_alive_interval(self.endpoint.http2_keep_alive_interval);
-        let executor = self.endpoint.executor.clone();
+        let builder = self.settings.clone();
+        let executor = self.executor.clone();
 
         Box::pin(async move {
             let io = fut.await.map_err(Into::into)?;

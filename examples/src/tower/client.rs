@@ -44,7 +44,6 @@ mod service {
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tonic::body::BoxBody;
-    use tonic::transport::Body;
     use tonic::transport::Channel;
     use tower::Service;
 

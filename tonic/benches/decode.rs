@@ -62,7 +62,7 @@ impl Body for MockBody {
 
     fn poll_frame(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        _cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         if self.data.has_remaining() {
             let split = std::cmp::min(self.chunk_size, self.data.remaining());

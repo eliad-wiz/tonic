@@ -234,10 +234,6 @@ mod tests {
     use super::*;
     use http_body::Frame;
     use http_body_util::Empty;
-    use std::{
-        pin::Pin,
-        task::{Context, Poll},
-    };
     use tower::ServiceExt;
 
     #[derive(Debug, Default)]
