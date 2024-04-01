@@ -2,7 +2,7 @@ use super::compression::{decompress, CompressionEncoding, CompressionSettings};
 use super::{BufferSettings, DecodeBuf, Decoder, DEFAULT_MAX_RECV_MESSAGE_SIZE, HEADER_SIZE};
 use crate::{body::BoxBody, metadata::MetadataMap, Code, Status};
 use bytes::{Buf, BufMut, BytesMut};
-use http::StatusCode;
+use http::{HeaderMap, StatusCode};
 use http_body::Body;
 use http_body_util::BodyExt;
 use std::{
@@ -28,7 +28,7 @@ struct StreamingInner {
     state: State,
     direction: Direction,
     buf: BytesMut,
-    trailers: Option<MetadataMap>,
+    trailers: Option<HeaderMap>,
     decompress_buf: BytesMut,
     encoding: Option<CompressionEncoding>,
     max_message_size: Option<usize>,
@@ -240,7 +240,7 @@ impl StreamingInner {
     }
 
     // Returns Some(()) if data was found or None if the loop in `poll_next` should break
-    fn poll_data(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<()>, Status>> {
+    fn poll_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<()>, Status>> {
         let chunk = match ready!(Pin::new(&mut self.body).poll_frame(cx)) {
             Some(Ok(d)) => Some(d),
             Some(Err(status)) => {
@@ -256,16 +256,16 @@ impl StreamingInner {
         };
 
         Poll::Ready(if let Some(frame) = chunk {
-            match frame.into_data() {
-                Ok(data) => {
-                    self.buf.put(data);
+            match frame {
+                frame if frame.is_data() => {
+                    self.buf.put(frame.into_data().unwrap());
                     Ok(Some(()))
                 }
-                //TODO: check if we need to handle trailers here
-                Err(e) => Err(Status::new(
-                    Code::Internal,
-                    format!("Error decoding body, expected data, got trailers: {:?}", e),
-                )),
+                frame if frame.is_trailers() => {
+                    self.trailers = Some(frame.into_trailers().unwrap());
+                    Ok(None)
+                }
+                frame => panic!("unexpected frame: {:?}", frame),
             }
         } else {
             // FIXME: improve buf usage.
@@ -281,42 +281,17 @@ impl StreamingInner {
         })
     }
 
-    fn poll_response(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Status>> {
+    fn response(&mut self) -> Result<(), Status> {
         if let Direction::Response(status) = self.direction {
-            let frame = match ready!(Pin::new(&mut self.body).poll_frame(cx)) {
-                Some(Ok(frame)) => frame,
-                Some(Err(status)) => {
-                    debug!("decoder inner trailers error: {:?}", status);
-                    return Poll::Ready(Err(status));
-                }
-                None => {
-                    self.trailers = None;
-                    return Poll::Ready(Ok(()));
-                }
-            };
-
-            match frame.into_trailers() {
-                Ok(trailer) => {
-                    if let Err(e) = crate::status::infer_grpc_status(Some(&trailer), status) {
-                        if let Some(e) = e {
-                            return Poll::Ready(Err(e));
-                        } else {
-                            return Poll::Ready(Ok(()));
-                        }
-                    } else {
-                        self.trailers = Some(MetadataMap::from_headers(trailer));
+            if let Some(trailers) = self.trailers.take() {
+                if let Err(e) = crate::status::infer_grpc_status(Some(&trailers), status) {
+                    if let Some(e) = e {
+                        return Err(e);
                     }
-                }
-                Err(frame) => {
-                    debug!("decoder expected trailers, found data: {:?}", frame);
-                    return Poll::Ready(Err(Status::new(
-                        Code::Internal,
-                        "expected trailers, found data".to_string(),
-                    )));
                 }
             }
         }
-        Poll::Ready(Ok(()))
+        Ok(())
     }
 }
 
@@ -376,7 +351,7 @@ impl<T> Streaming<T> {
         // Shortcut to see if we already pulled the trailers in the stream step
         // we need to do that so that the stream can error on trailing grpc-status
         if let Some(trailers) = self.inner.trailers.take() {
-            return Ok(Some(trailers));
+            return Ok(Some(MetadataMap::from_headers(trailers)));
         }
 
         // To fetch the trailers we must clear the body and drop it.
@@ -385,21 +360,11 @@ impl<T> Streaming<T> {
         // Since we call poll_trailers internally on poll_next we need to
         // check if it got cached again.
         if let Some(trailers) = self.inner.trailers.take() {
-            return Ok(Some(trailers));
+            return Ok(Some(MetadataMap::from_headers(trailers)));
         }
 
-        // Trailers were not caught during poll_next and thus lets poll for
-        // them manually.
-        let map = future::poll_fn(|cx| Pin::new(&mut self.inner.body).poll_frame(cx))
-            .await
-            .map(|r| match r {
-                Ok(frame) => Ok(frame
-                    .into_trailers()
-                    .expect("more data left to poll while trying to poll trailers")),
-                Err(e) => Err(Status::from_error(Box::new(e))),
-            });
-
-        map.map(|x| x.map(MetadataMap::from_headers)).transpose()
+        // We've polled through all the frames, and still no trailers, return None
+        Ok(None)
     }
 
     fn decode_chunk(&mut self) -> Result<Option<T>, Status> {
@@ -432,16 +397,20 @@ impl<T> Stream for Streaming<T> {
                 return Poll::Ready(Some(Ok(item)));
             }
 
-            match ready!(self.inner.poll_data(cx))? {
+            match ready!(self.inner.poll_frame(cx))? {
                 Some(()) => (),
                 None => break,
             }
         }
 
-        Poll::Ready(match ready!(self.inner.poll_response(cx)) {
-            Ok(()) => None,
-            Err(err) => Some(Err(err)),
-        })
+        if let Direction::Response(status) = self.inner.direction {
+            if let Some(trailers) = self.inner.trailers.as_ref() {
+                if let Err(Some(e)) = crate::status::infer_grpc_status(Some(trailers), status) {
+                    return Poll::Ready(Some(Err(e)));
+                }
+            }
+        }
+        Poll::Ready(None)
     }
 }
 
