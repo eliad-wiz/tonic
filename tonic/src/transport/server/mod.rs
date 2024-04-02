@@ -558,32 +558,46 @@ impl<L> Server<L> {
             // .max_pending_accept_reset_streams(http2_max_pending_accept_reset_streams)
             .max_frame_size(max_frame_size);
 
+        let (signal_tx, signal_rx) = tokio::sync::watch::channel(());
+        let signal_tx = Arc::new(signal_tx);
+
         tokio::pin!(incoming);
 
+        let sig = Fuse { inner: signal };
+        tokio::pin!(sig);
+
         loop {
-            let io = match incoming
-                .try_next()
-                .await
-                .map_err(super::Error::from_source)?
-            {
-                Some(io) => io,
-                None => break,
-            };
+            tokio::select! {
+                _ = &mut sig => {
+                    trace!("signal received, shutting down");
+                    drop(signal_rx);
+                    break;
+                },
+                io = incoming.next() => {
+                    let io = match io {
+                        Some(Ok(io)) => io,
+                        Some(Err(e)) => {
+                            trace!("error accepting connection: {:#}", e);
+                            continue;
+                        },
+                        None => break,
+                    };
 
-            trace!("connection accepted");
+                    trace!("connection accepted");
 
-            poll_fn(|cx| make_service.poll_ready(cx))
-                .await
-                .map_err(super::Error::from_source)?;
+                    poll_fn(|cx| make_service.poll_ready(cx))
+                        .await
+                        .map_err(super::Error::from_source)?;
 
-            let req_svc = make_service
-                .call(&io)
-                .await
-                .map_err(super::Error::from_source)?;
-            let hyper_svc = TowerToHyperService::new(req_svc);
+                    let req_svc = make_service
+                        .call(&io)
+                        .await
+                        .map_err(super::Error::from_source)?;
+                    let hyper_svc = TowerToHyperService::new(req_svc);
 
-            let builder = builder.clone();
-            serve_connection(io, hyper_svc, builder);
+                    serve_connection(io, hyper_svc, builder.clone(), signal_tx.clone());
+                }
+            }
         }
 
         Ok(())
@@ -596,6 +610,7 @@ fn serve_connection<IO, S>(
     io: ServerIo<IO>,
     hyper_svc: TowerToHyperService<S>,
     builder: hyper_util::server::conn::auto::Builder<TokioExecutor>,
+    watcher: Arc<tokio::sync::watch::Sender<()>>,
 ) where
     S: Service<Request, Response = Response> + Clone + Send + 'static,
     S::Future: Send + 'static,
@@ -604,25 +619,62 @@ fn serve_connection<IO, S>(
     IO::ConnectInfo: Clone + Send + Sync + 'static,
 {
     tokio::spawn(async move {
-        if let Err(err) = builder
-            .serve_connection_with_upgrades(TokioIo::new(io), hyper_svc)
-            .await
-        {
-            trace!("failed serving connection: {:#}", err);
+        let sig = Fuse {
+            inner: Some(watcher.closed()),
+        };
+
+        tokio::pin!(sig);
+
+        let conn = builder.serve_connection(TokioIo::new(io), hyper_svc);
+        tokio::pin!(conn);
+
+        loop {
+            tokio::select! {
+                rv = &mut conn => {
+                    if let Err(err) = rv {
+                        trace!("failed serving connection: {:#}", err);
+                    }
+                    break;
+                },
+                _ = &mut sig => {
+                    trace!("signal received, shutting down");
+                    conn.as_mut().graceful_shutdown();
+                }
+            }
         }
 
         trace!("connection closed");
     });
 }
 
+/// An adaptor which converts a [`tower::Service`] to a [`hyper::service::Service`].
+///
+/// The [`hyper::service::Service`] trait is used by hyper to handle incoming requests,
+/// and does not support the `poll_ready` method that is used by tower services.
 #[derive(Debug, Copy, Clone)]
 pub struct TowerToHyperService<S> {
     service: S,
 }
 
 impl<S> TowerToHyperService<S> {
+    /// Create a new `TowerToHyperService` from a tower service.
     pub fn new(service: S) -> Self {
         Self { service }
+    }
+
+    /// Extract the inner tower service.
+    pub fn into_inner(self) -> S {
+        self.service
+    }
+
+    /// Get a reference to the inner tower service.
+    pub fn as_inner(&self) -> &S {
+        &self.service
+    }
+
+    /// Get a mutable reference to the inner tower service.
+    pub fn as_inner_mut(&mut self) -> &mut S {
+        &mut self.service
     }
 }
 
@@ -643,6 +695,8 @@ where
     }
 }
 
+/// Future returned by [`TowerToHyperService`].
+#[derive(Debug)]
 #[pin_project]
 pub struct TowerToHyperServiceFuture<S, R>
 where
@@ -994,5 +1048,28 @@ where
             });
 
         future::ready(Ok(svc))
+    }
+}
+
+#[pin_project]
+struct Fuse<F> {
+    #[pin]
+    inner: Option<F>,
+}
+
+impl<F> Future for Fuse<F>
+where
+    F: Future,
+{
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.as_mut().project().inner.as_pin_mut() {
+            Some(fut) => fut.poll(cx).map(|output| {
+                self.project().inner.set(None);
+                output
+            }),
+            None => Poll::Pending,
+        }
     }
 }
