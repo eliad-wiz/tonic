@@ -25,6 +25,7 @@ use tokio_stream::StreamExt as _;
 use tower::util::BoxCloneService;
 use tower::util::Oneshot;
 use tower::ServiceExt;
+use tracing::debug;
 use tracing::trace;
 
 #[cfg(feature = "tls")]
@@ -563,6 +564,7 @@ impl<L> Server<L> {
 
         tokio::pin!(incoming);
 
+        let graceful = signal.is_some();
         let sig = Fuse { inner: signal };
         tokio::pin!(sig);
 
@@ -570,7 +572,6 @@ impl<L> Server<L> {
             tokio::select! {
                 _ = &mut sig => {
                     trace!("signal received, shutting down");
-                    drop(signal_rx);
                     break;
                 },
                 io = incoming.next() => {
@@ -580,7 +581,9 @@ impl<L> Server<L> {
                             trace!("error accepting connection: {:#}", e);
                             continue;
                         },
-                        None => break,
+                        None => {
+                            break
+                        },
                     };
 
                     trace!("connection accepted");
@@ -595,9 +598,21 @@ impl<L> Server<L> {
                         .map_err(super::Error::from_source)?;
                     let hyper_svc = TowerToHyperService::new(req_svc);
 
-                    serve_connection(io, hyper_svc, builder.clone(), signal_tx.clone());
+                    serve_connection(io, hyper_svc, builder.clone(), graceful.then(|| signal_rx.clone()));
                 }
             }
+        }
+
+        if graceful {
+            let _ = signal_tx.send(());
+            drop(signal_rx);
+            trace!(
+                "waiting for {} connections to close",
+                signal_tx.receiver_count()
+            );
+
+            // Wait for all connections to close
+            signal_tx.closed().await;
         }
 
         Ok(())
@@ -610,7 +625,7 @@ fn serve_connection<IO, S>(
     io: ServerIo<IO>,
     hyper_svc: TowerToHyperService<S>,
     builder: hyper_util::server::conn::auto::Builder<TokioExecutor>,
-    watcher: Arc<tokio::sync::watch::Sender<()>>,
+    mut watcher: Option<tokio::sync::watch::Receiver<()>>,
 ) where
     S: Service<Request, Response = Response> + Clone + Send + 'static,
     S::Future: Send + 'static,
@@ -619,30 +634,32 @@ fn serve_connection<IO, S>(
     IO::ConnectInfo: Clone + Send + Sync + 'static,
 {
     tokio::spawn(async move {
-        let sig = Fuse {
-            inner: Some(watcher.closed()),
-        };
+        {
+            let sig = Fuse {
+                inner: watcher.as_mut().map(|w| w.changed()),
+            };
 
-        tokio::pin!(sig);
+            tokio::pin!(sig);
 
-        let conn = builder.serve_connection(TokioIo::new(io), hyper_svc);
-        tokio::pin!(conn);
+            let conn = builder.serve_connection(TokioIo::new(io), hyper_svc);
+            tokio::pin!(conn);
 
-        loop {
-            tokio::select! {
-                rv = &mut conn => {
-                    if let Err(err) = rv {
-                        trace!("failed serving connection: {:#}", err);
+            loop {
+                tokio::select! {
+                    rv = &mut conn => {
+                        if let Err(err) = rv {
+                            debug!("failed serving connection: {:#}", err);
+                        }
+                        break;
+                    },
+                    _ = &mut sig => {
+                        conn.as_mut().graceful_shutdown();
                     }
-                    break;
-                },
-                _ = &mut sig => {
-                    trace!("signal received, shutting down");
-                    conn.as_mut().graceful_shutdown();
                 }
             }
         }
 
+        drop(watcher);
         trace!("connection closed");
     });
 }
@@ -1055,6 +1072,12 @@ where
 struct Fuse<F> {
     #[pin]
     inner: Option<F>,
+}
+
+impl<F> Fuse<F> {
+    fn is_terminated(self: &Pin<&mut Self>) -> bool {
+        self.inner.is_none()
+    }
 }
 
 impl<F> Future for Fuse<F>
