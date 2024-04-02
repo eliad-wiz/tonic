@@ -311,7 +311,7 @@ mod tests {
                 .expect("got trailers")
                 .get("grpc-status")
                 .expect("grpc-status header"),
-            "11"
+            "8"
         );
         assert!(body.is_end_stream());
     }

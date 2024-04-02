@@ -317,15 +317,22 @@ where
                     Some(Ok(Frame::trailers(status.to_header_map()?))).into()
                 }
             },
-            None => {
-                self_proj.state.is_end_stream = true;
-                let status = if let Some(status) = self_proj.state.error.take() {
-                    status
-                } else {
-                    Status::new(Code::Ok, "")
-                };
-                Some(Ok(Frame::trailers(status.to_header_map()?))).into()
-            }
+            None => match self_proj.state.role {
+                Role::Client => None.into(),
+                Role::Server => {
+                    if self_proj.state.is_end_stream {
+                        None.into()
+                    } else {
+                        self_proj.state.is_end_stream = true;
+                        let status = if let Some(status) = self_proj.state.error.take() {
+                            status
+                        } else {
+                            Status::new(Code::Ok, "")
+                        };
+                        Some(Ok(Frame::trailers(status.to_header_map()?))).into()
+                    }
+                }
+            },
         }
     }
 
