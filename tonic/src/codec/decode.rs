@@ -403,13 +403,10 @@ impl<T> Stream for Streaming<T> {
             }
         }
 
-        if let Direction::Response(status) = self.inner.direction {
-            if let Some(trailers) = self.inner.trailers.as_ref() {
-                if let Err(Some(e)) = crate::status::infer_grpc_status(Some(trailers), status) {
-                    return Poll::Ready(Some(Err(e)));
-                }
-            }
+        if let Err(status) = self.inner.response() {
+            return Poll::Ready(Some(Err(status)));
         }
+
         Poll::Ready(None)
     }
 }
