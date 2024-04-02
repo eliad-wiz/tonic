@@ -4,7 +4,6 @@ use super::compression::{
 use super::{BufferSettings, EncodeBuf, Encoder, DEFAULT_MAX_SEND_MESSAGE_SIZE, HEADER_SIZE};
 use crate::{Code, Status};
 use bytes::{BufMut, Bytes, BytesMut};
-use http::HeaderMap;
 use http_body::{Body, Frame};
 use pin_project::pin_project;
 use std::{
@@ -297,28 +296,6 @@ where
     }
 }
 
-impl EncodeState {
-    fn trailers(&mut self) -> Result<Option<HeaderMap>, Status> {
-        match self.role {
-            Role::Client => Ok(None),
-            Role::Server => {
-                if self.is_end_stream {
-                    return Ok(None);
-                }
-
-                let status = if let Some(status) = self.error.take() {
-                    self.is_end_stream = true;
-                    status
-                } else {
-                    Status::new(Code::Ok, "")
-                };
-
-                Ok(Some(status.to_header_map()?))
-            }
-        }
-    }
-}
-
 impl<S> Body for EncodeBody<S>
 where
     S: Stream<Item = Result<Bytes, Status>>,
@@ -336,11 +313,19 @@ where
             Some(Err(status)) => match self_proj.state.role {
                 Role::Client => Some(Err(status)).into(),
                 Role::Server => {
-                    self_proj.state.error = Some(status);
-                    None.into()
+                    self_proj.state.is_end_stream = true;
+                    Some(Ok(Frame::trailers(status.to_header_map()?))).into()
                 }
             },
-            None => None.into(),
+            None => {
+                self_proj.state.is_end_stream = true;
+                let status = if let Some(status) = self_proj.state.error.take() {
+                    status
+                } else {
+                    Status::new(Code::Ok, "")
+                };
+                Some(Ok(Frame::trailers(status.to_header_map()?))).into()
+            }
         }
     }
 

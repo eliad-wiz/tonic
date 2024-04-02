@@ -266,8 +266,8 @@ mod tests {
         let frame = body
             .frame()
             .await
-            .expect("no error polling frame")
-            .expect("at least one frame");
+            .expect("at least one frame")
+            .expect("no error polling frame");
         assert_eq!(
             frame
                 .into_trailers()
@@ -303,8 +303,8 @@ mod tests {
         let frame = body
             .frame()
             .await
-            .expect("no error polling frame")
-            .expect("at least one frame");
+            .expect("at least one frame")
+            .expect("no error polling frame");
         assert_eq!(
             frame
                 .into_trailers()
