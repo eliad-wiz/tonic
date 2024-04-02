@@ -167,6 +167,8 @@ impl TcpIncoming {
         tcp_keepalive_timeout: Option<Duration>,
     ) -> Result<Self, crate::Error> {
         let std_listener = StdTcpListener::bind(addr)?;
+        std_listener.set_nonblocking(true)?;
+        //TODO: set SO_NODELAY and SO_KEEPALIVE, reqiures socket2 crate
         let inner = TcpListenerStream::new(TcpListener::from_std(std_listener)?);
         Ok(Self {
             inner,
