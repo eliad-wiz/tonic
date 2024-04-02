@@ -148,7 +148,7 @@ async fn decode_body(body: Incoming, content_type: &str) -> (Output, Bytes) {
     body.advance(1);
     let len = body.get_u32();
     let msg = Output::decode(&mut body.split_to(len as usize)).expect("decode");
-    body.advance(5);
+    // body.advance(5);
 
     (msg, body)
 }

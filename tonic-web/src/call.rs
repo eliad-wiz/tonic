@@ -63,9 +63,9 @@ pub struct GrpcWebCall<B> {
     #[pin]
     inner: B,
     buf: BytesMut,
+    decoded: BytesMut,
     direction: Direction,
     encoding: Encoding,
-    poll_trailers: bool,
     client: bool,
     trailers: Option<HeaderMap>,
 }
@@ -75,9 +75,9 @@ impl<B: Default> Default for GrpcWebCall<B> {
         Self {
             inner: Default::default(),
             buf: Default::default(),
+            decoded: Default::default(),
             direction: Direction::Empty,
             encoding: Encoding::None,
-            poll_trailers: Default::default(),
             client: Default::default(),
             trailers: Default::default(),
         }
@@ -108,9 +108,12 @@ impl<B> GrpcWebCall<B> {
                 (Direction::Encode, Encoding::Base64) => BUFFER_SIZE,
                 _ => 0,
             }),
+            decoded: BytesMut::with_capacity(match direction {
+                Direction::Decode => BUFFER_SIZE,
+                _ => 0,
+            }),
             direction,
             encoding,
-            poll_trailers: true,
             client: true,
             trailers: None,
         }
@@ -123,9 +126,9 @@ impl<B> GrpcWebCall<B> {
                 (Direction::Encode, Encoding::Base64) => BUFFER_SIZE,
                 _ => 0,
             }),
+            decoded: BytesMut::with_capacity(0),
             direction,
             encoding,
-            poll_trailers: true,
             client: false,
             trailers: None,
         }
@@ -160,6 +163,9 @@ where
     B: Body<Data = Bytes>,
     B::Error: Error,
 {
+    // Poll body for data, decoding (e.g. via Base64 if necessary) and returning frames
+    // to the caller. If the caller is a client, it should look for trailers before
+    // returning these frames.
     fn poll_decode(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -222,7 +228,7 @@ where
 
                 Poll::Ready(Some(Ok(Frame::data(res))))
             }
-            Some(Ok(frame)) => {
+            Some(Ok(frame)) if frame.is_trailers() => {
                 let trailers = frame.into_trailers().expect("must be trailers");
                 let mut frame = make_trailers_frame(trailers);
                 if *this.encoding == Encoding::Base64 {
@@ -230,6 +236,7 @@ where
                 }
                 Poll::Ready(Some(Ok(Frame::data(frame.into()))))
             }
+            Some(Ok(_)) => unreachable!("unexpected frame type"),
             Some(Err(e)) => Poll::Ready(Some(Err(internal_error(e)))),
             None => Poll::Ready(None),
         }
@@ -252,9 +259,12 @@ where
             let mut me = self.as_mut();
 
             loop {
-                let incoming_buf = match ready!(me.as_mut().poll_decode(cx)) {
+                match ready!(me.as_mut().poll_decode(cx)) {
                     Some(Ok(incoming_buf)) if incoming_buf.is_data() => {
-                        incoming_buf.into_data().unwrap()
+                        me.as_mut()
+                            .project()
+                            .decoded
+                            .put(incoming_buf.into_data().unwrap());
                     }
                     Some(Ok(incoming_buf)) if incoming_buf.is_trailers() => {
                         let trailers = incoming_buf.into_trailers().unwrap();
@@ -262,18 +272,13 @@ where
                         continue;
                     }
                     Some(Ok(_)) => unreachable!("unexpected frame type"),
-                    None => {
-                        // TODO: Consider eofing here?
-                        // Even if the buffer has more data, this will hit the eof branch
-                        // of decode in tonic
-                        return Poll::Ready(None);
-                    }
+                    None => {} // No more data to decode, time to look for trailers
                     Some(Err(e)) => return Poll::Ready(Some(Err(e))),
                 };
 
-                let buf = &mut me.as_mut().project().buf;
-
-                buf.put(incoming_buf);
+                // Hold the incoming, decoded data until we have a full message
+                // or trailers to return.
+                let buf = me.as_mut().project().decoded;
 
                 return match find_trailers(&buf[..])? {
                     FindTrailers::Trailer(len) => {
@@ -281,7 +286,7 @@ where
                         let msg_buf = buf.copy_to_bytes(len);
                         match decode_trailers_frame(buf.split().freeze()) {
                             Ok(Some(trailers)) => {
-                                self.project().trailers.replace(trailers);
+                                me.as_mut().project().trailers.replace(trailers);
                             }
                             Err(e) => return Poll::Ready(Some(Err(e))),
                             _ => {}
@@ -290,7 +295,11 @@ where
                         if msg_buf.has_remaining() {
                             Poll::Ready(Some(Ok(Frame::data(msg_buf))))
                         } else {
-                            Poll::Ready(None)
+                            if let Some(trailers) = me.as_mut().project().trailers.take() {
+                                Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+                            } else {
+                                Poll::Ready(None)
+                            }
                         }
                     }
                     FindTrailers::IncompleteBuf => continue,
