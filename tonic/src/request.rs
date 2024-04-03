@@ -311,6 +311,7 @@ impl<T> Request<T> {
     /// ```no_run
     /// use tonic::{Request, service::interceptor};
     ///
+    /// #[derive(Clone)] // Extensions must be Clone
     /// struct MyExtension {
     ///     some_piece_of_data: String,
     /// }
