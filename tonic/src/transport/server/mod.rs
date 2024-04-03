@@ -523,8 +523,8 @@ impl<L> Server<L> {
         let timeout = self.timeout;
         let max_frame_size = self.max_frame_size;
 
-        // FIXME: this requires additonal implementation here.
-        let http2_only = !self.accept_http1;
+        // TODO: Reqiures support from hyper-util
+        let _http2_only = !self.accept_http1;
 
         let http2_keepalive_interval = self.http2_keepalive_interval;
         let http2_keepalive_timeout = self
@@ -532,7 +532,8 @@ impl<L> Server<L> {
             .unwrap_or_else(|| Duration::new(DEFAULT_HTTP2_KEEPALIVE_TIMEOUT_SECS, 0));
         let http2_adaptive_window = self.http2_adaptive_window;
 
-        let http2_max_pending_accept_reset_streams = self.http2_max_pending_accept_reset_streams;
+        // TODO: Requires a new release of hyper and hyper-util
+        let _http2_max_pending_accept_reset_streams = self.http2_max_pending_accept_reset_streams;
 
         let make_service = self.service_builder.service(svc);
 
@@ -547,6 +548,9 @@ impl<L> Server<L> {
 
         let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
 
+        //TODO: Set http2-only when available in hyper_util
+        //builder.http2_only(http2_only);
+
         builder
             .http2()
             .initial_connection_window_size(init_connection_window_size)
@@ -555,8 +559,8 @@ impl<L> Server<L> {
             .keep_alive_interval(http2_keepalive_interval)
             .keep_alive_timeout(http2_keepalive_timeout)
             .adaptive_window(http2_adaptive_window.unwrap_or_default())
-            // FIXME: wait for this to be added to hyper-util
-            // .max_pending_accept_reset_streams(http2_max_pending_accept_reset_streams)
+            // TODO: wait for this to be added to hyper-util
+            //.max_pending_accept_reset_streams(http2_max_pending_accept_reset_streams)
             .max_frame_size(max_frame_size);
 
         let (signal_tx, signal_rx) = tokio::sync::watch::channel(());
@@ -1068,16 +1072,11 @@ where
     }
 }
 
+// A future which only yields `Poll::Ready` once, and thereafter yields `Poll::Pending`.
 #[pin_project]
 struct Fuse<F> {
     #[pin]
     inner: Option<F>,
-}
-
-impl<F> Fuse<F> {
-    fn is_terminated(self: &Pin<&mut Self>) -> bool {
-        self.inner.is_none()
-    }
 }
 
 impl<F> Future for Fuse<F>

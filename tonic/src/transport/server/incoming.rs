@@ -3,7 +3,7 @@ use crate::transport::service::ServerIo;
 use std::{
     net::{SocketAddr, TcpListener as StdTcpListener},
     pin::{pin, Pin},
-    task::{Context, Poll},
+    task::{ready, Context, Poll},
     time::Duration,
 };
 use tokio::{
@@ -12,6 +12,7 @@ use tokio::{
 };
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::{Stream, StreamExt};
+use tracing::warn;
 
 #[cfg(not(feature = "tls"))]
 pub(crate) fn tcp_incoming<IO, IE, L>(
@@ -195,7 +196,35 @@ impl Stream for TcpIncoming {
     type Item = Result<TcpStream, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
+        match ready!(Pin::new(&mut self.inner).poll_next(cx)) {
+            Some(Ok(stream)) => {
+                set_accept_socketoptions(&stream, self.tcp_nodelay, self.tcp_keepalive_timeout);
+                Some(Ok(stream)).into()
+            }
+            other => Poll::Ready(other),
+        }
+    }
+}
+
+// Consistent with hyper-0.14, this function does not return an error.
+fn set_accept_socketoptions(
+    stream: &TcpStream,
+    tcp_nodelay: bool,
+    tcp_keepalive_timeout: Option<Duration>,
+) {
+    if tcp_nodelay {
+        if let Err(e) = stream.set_nodelay(true) {
+            warn!("error trying to set TCP nodelay: {}", e);
+        }
+    }
+
+    if let Some(timeout) = tcp_keepalive_timeout {
+        let sock_ref = socket2::SockRef::from(&stream);
+        let sock_keepalive = socket2::TcpKeepalive::new().with_time(timeout);
+
+        if let Err(e) = sock_ref.set_tcp_keepalive(&sock_keepalive) {
+            warn!("error trying to set TCP keepalive: {}", e);
+        }
     }
 }
 
