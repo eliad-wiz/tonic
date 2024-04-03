@@ -194,7 +194,7 @@ where
         Ok(()).into()
     }
 
-    fn call(&mut self, req: http::Request<hyper::Body>) -> Self::Future {
+    fn call(&mut self, req: http::Request<BoxBody>) -> Self::Future {
         let echo_header = req.headers().get("x-grpc-test-echo-initial").cloned();
 
         let echo_trailer = req

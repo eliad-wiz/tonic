@@ -1,28 +1,19 @@
-use std::{
-    io::Cursor,
-    {fmt, sync::Arc},
-};
-
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_rustls::{
-    rustls::{server::WebPkiClientVerifier, ClientConfig, RootCertStore, ServerConfig},
-    TlsAcceptor as RustlsAcceptor, TlsConnector as RustlsConnector,
-};
-
-use super::io::BoxedIo;
-use crate::transport::{
-    server::{Connected, TlsStream},
-    Certificate, Identity,
-};
-use hyper_util::rt::TokioIo;
 use std::{fmt, sync::Arc};
+
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::{
     rustls::pki_types::ServerName,
     rustls::{ClientConfig, RootCertStore, ServerConfig},
     TlsAcceptor as RustlsAcceptor, TlsConnector as RustlsConnector,
 };
+
+use self::rustls_keys::{add_certs_from_pem, load_identity};
+use super::io::BoxedIo;
+use crate::transport::{
+    server::{Connected, TlsStream},
+    Certificate, Identity,
+};
+use hyper_util::rt::TokioIo;
 
 /// h2 alpn in plain format for rustls.
 const ALPN_H2: &[u8] = b"h2";
@@ -37,7 +28,7 @@ enum TlsError {
 #[derive(Clone)]
 pub(crate) struct TlsConnector {
     config: Arc<ClientConfig>,
-    domain: Arc<ServerName<'static><'static>>,
+    domain: Arc<ServerName<'static>>,
     assume_http2: bool,
 }
 
@@ -58,7 +49,7 @@ impl TlsConnector {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
         if let Some(cert) = ca_cert {
-            add_certs_from_pem(&mut Cursor::new(cert), &mut roots)?;
+            add_certs_from_pem(std::io::Cursor::new(cert.as_ref()), &mut roots)?;
         }
 
         let builder = builder.with_root_certificates(roots);
@@ -70,9 +61,7 @@ impl TlsConnector {
             None => builder.with_no_client_auth(),
         };
 
-        let domain: ServerName<'static> = ServerName::try_from(domain.as_str())?.to_owned();
-
-        let domain: ServerName<'static> = ServerName::try_from(domain.as_str())?.to_owned();
+        let domain: ServerName<'static> = ServerName::try_from(domain)?.to_owned();
 
         config.alpn_protocols.push(ALPN_H2.into());
         Ok(Self {
@@ -99,7 +88,8 @@ impl TlsConnector {
 
             match session.alpn_protocol() {
                 Some(b) if b == b"h2" => (),
-                _ if !assume_http2 => return Err(TlsError::H2NotNegotiated.into()),
+                _ if assume_http2 => (),
+                _ => return Err(TlsError::H2NotNegotiated.into()),
             };
 
             BoxedIo::new(TokioIo::new(io))
@@ -124,7 +114,6 @@ impl TlsAcceptor {
         client_ca_root: Option<Certificate>,
         client_auth_optional: bool,
     ) -> Result<Self, crate::Error> {
-        let builder = ServerConfig::builder();
         let builder = ServerConfig::builder();
 
         let builder = match (client_ca_root, client_auth_optional) {
@@ -236,8 +225,8 @@ mod rustls_keys {
             }
         };
 
-    Ok((cert, key))
-}
+        Ok((cert, key))
+    }
 
     pub(crate) fn add_certs_from_pem(
         mut certs: Cursor<&[u8]>,

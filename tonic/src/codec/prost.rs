@@ -156,8 +156,8 @@ mod tests {
     use crate::{Code, Status};
     use bytes::{Buf, BufMut, BytesMut};
     use http_body::Body;
-    use std::pin::pin;
     use http_body_util::BodyExt as _;
+    use std::pin::pin;
 
     const LEN: usize = 10000;
     // The maximum uncompressed size in bytes for a message. Set to 2MB.
@@ -239,7 +239,6 @@ mod tests {
             None,
         ));
 
-
         while let Some(r) = body.frame().await {
             r.unwrap();
         }
@@ -260,9 +259,8 @@ mod tests {
             None,
             SingleMessageCompressionOverride::default(),
             Some(MAX_MESSAGE_SIZE),
-        );
+        ));
 
-        tokio::pin!(body);
         let frame = body
             .frame()
             .await
@@ -297,8 +295,6 @@ mod tests {
             SingleMessageCompressionOverride::default(),
             Some(usize::MAX),
         ));
-
-        tokio::pin!(body);
 
         let frame = body
             .frame()

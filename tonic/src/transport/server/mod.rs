@@ -523,8 +523,7 @@ impl<L> Server<L> {
         let timeout = self.timeout;
         let max_frame_size = self.max_frame_size;
 
-        // TODO: Reqiures support from hyper-util
-        let _http2_only = !self.accept_http1;
+        let http2_only = !self.accept_http1;
 
         let http2_keepalive_interval = self.http2_keepalive_interval;
         let http2_keepalive_timeout = self
@@ -546,22 +545,44 @@ impl<L> Server<L> {
             _io: PhantomData,
         };
 
-        let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+        let builder = if http2_only {
+            let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
 
-        //TODO: Set http2-only when available in hyper_util
-        //builder.http2_only(http2_only);
+            //TODO: Set http2-only when available in hyper_util
+            //builder.http2_only(http2_only);
 
-        builder
-            .http2()
-            .initial_connection_window_size(init_connection_window_size)
-            .initial_stream_window_size(init_stream_window_size)
-            .max_concurrent_streams(max_concurrent_streams)
-            .keep_alive_interval(http2_keepalive_interval)
-            .keep_alive_timeout(http2_keepalive_timeout)
-            .adaptive_window(http2_adaptive_window.unwrap_or_default())
-            // TODO: wait for this to be added to hyper-util
-            //.max_pending_accept_reset_streams(http2_max_pending_accept_reset_streams)
-            .max_frame_size(max_frame_size);
+            builder
+                .initial_connection_window_size(init_connection_window_size)
+                .initial_stream_window_size(init_stream_window_size)
+                .max_concurrent_streams(max_concurrent_streams)
+                .keep_alive_interval(http2_keepalive_interval)
+                .keep_alive_timeout(http2_keepalive_timeout)
+                .adaptive_window(http2_adaptive_window.unwrap_or_default())
+                // TODO: wait for this to be added to hyper-util
+                //.max_pending_accept_reset_streams(http2_max_pending_accept_reset_streams)
+                .max_frame_size(max_frame_size);
+
+            ConnectionBuilder::Http2(builder)
+        } else {
+            let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+
+            //TODO: Set http2-only when available in hyper_util
+            //builder.http2_only(http2_only);
+
+            builder
+                .http2()
+                .initial_connection_window_size(init_connection_window_size)
+                .initial_stream_window_size(init_stream_window_size)
+                .max_concurrent_streams(max_concurrent_streams)
+                .keep_alive_interval(http2_keepalive_interval)
+                .keep_alive_timeout(http2_keepalive_timeout)
+                .adaptive_window(http2_adaptive_window.unwrap_or_default())
+                // TODO: wait for this to be added to hyper-util
+                //.max_pending_accept_reset_streams(http2_max_pending_accept_reset_streams)
+                .max_frame_size(max_frame_size);
+
+            ConnectionBuilder::Auto(builder)
+        };
 
         let (signal_tx, signal_rx) = tokio::sync::watch::channel(());
         let signal_tx = Arc::new(signal_tx);
@@ -628,7 +649,7 @@ impl<L> Server<L> {
 fn serve_connection<IO, S>(
     io: ServerIo<IO>,
     hyper_svc: TowerToHyperService<S>,
-    builder: hyper_util::server::conn::auto::Builder<TokioExecutor>,
+    builder: ConnectionBuilder,
     mut watcher: Option<tokio::sync::watch::Receiver<()>>,
 ) where
     S: Service<Request, Response = Response> + Clone + Send + 'static,
@@ -645,7 +666,7 @@ fn serve_connection<IO, S>(
 
             tokio::pin!(sig);
 
-            let conn = builder.serve_connection(TokioIo::new(io), hyper_svc);
+            let conn = builder.serve_connection(io, hyper_svc);
             tokio::pin!(conn);
 
             loop {
@@ -666,6 +687,84 @@ fn serve_connection<IO, S>(
         drop(watcher);
         trace!("connection closed");
     });
+}
+
+#[pin_project(project = ConnectionProj)]
+enum Connection<'c, I, S>
+where
+    S: Service<Request, Response = Response> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    S::Error: Into<BoxError> + Send,
+{
+    Auto(
+        #[pin]
+        hyper_util::server::conn::auto::Connection<'c, I, TowerToHyperService<S>, TokioExecutor>,
+    ),
+    Http2(#[pin] hyper::server::conn::http2::Connection<I, TowerToHyperService<S>, TokioExecutor>),
+}
+
+impl<'c, I, S> Connection<'c, I, S>
+where
+    S: Service<Request, Response = Response> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    S::Error: Into<BoxError> + Send,
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    fn graceful_shutdown(self: Pin<&mut Self>) {
+        match self.project() {
+            ConnectionProj::Auto(conn) => conn.graceful_shutdown(),
+            ConnectionProj::Http2(conn) => conn.graceful_shutdown(),
+        }
+    }
+}
+
+impl<'c, I, S> Future for Connection<'c, I, S>
+where
+    S: Service<Request, Response = Response> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    S::Error: Into<BoxError> + Send,
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    type Output = Result<(), super::Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.project() {
+            ConnectionProj::Auto(conn) => conn.poll(cx).map_err(super::Error::from_source),
+            ConnectionProj::Http2(conn) => conn.poll(cx).map_err(super::Error::from_source),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ConnectionBuilder {
+    Auto(hyper_util::server::conn::auto::Builder<TokioExecutor>),
+    Http2(hyper::server::conn::http2::Builder<TokioExecutor>),
+}
+
+impl ConnectionBuilder {
+    fn serve_connection<IO, S>(
+        &self,
+        io: ServerIo<IO>,
+        hyper_svc: TowerToHyperService<S>,
+    ) -> Connection<'_, TokioIo<ServerIo<IO>>, S>
+    where
+        S: Service<Request, Response = Response> + Clone + Send + 'static,
+        S::Future: Send + 'static,
+        S::Error: Into<BoxError> + Send,
+        IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+        IO::ConnectInfo: Clone + Send + Sync + 'static,
+    {
+        match self {
+            ConnectionBuilder::Auto(builder) => {
+                let conn = builder.serve_connection(TokioIo::new(io), hyper_svc);
+                Connection::Auto(conn)
+            }
+            ConnectionBuilder::Http2(builder) => {
+                let conn = builder.serve_connection(TokioIo::new(io), hyper_svc);
+                Connection::Http2(conn)
+            }
+        }
+    }
 }
 
 /// An adaptor which converts a [`tower::Service`] to a [`hyper::service::Service`].
