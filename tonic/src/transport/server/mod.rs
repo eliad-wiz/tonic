@@ -21,6 +21,7 @@ pub use tls::ServerTlsConfig;
 #[cfg(feature = "tls")]
 pub use conn::TlsConnectInfo;
 
+use std::pin::pin;
 use tokio_stream::StreamExt as _;
 use tower::util::BoxCloneService;
 use tower::util::Oneshot;
@@ -587,11 +588,9 @@ impl<L> Server<L> {
         let (signal_tx, signal_rx) = tokio::sync::watch::channel(());
         let signal_tx = Arc::new(signal_tx);
 
-        tokio::pin!(incoming);
-
         let graceful = signal.is_some();
-        let sig = Fuse { inner: signal };
-        tokio::pin!(sig);
+        let mut sig = pin!(Fuse { inner: signal });
+        let mut incoming = pin!(incoming);
 
         loop {
             tokio::select! {
@@ -660,14 +659,11 @@ fn serve_connection<IO, S>(
 {
     tokio::spawn(async move {
         {
-            let sig = Fuse {
+            let mut sig = pin!(Fuse {
                 inner: watcher.as_mut().map(|w| w.changed()),
-            };
+            });
 
-            tokio::pin!(sig);
-
-            let conn = builder.serve_connection(io, hyper_svc);
-            tokio::pin!(conn);
+            let mut conn = pin!(builder.serve_connection(io, hyper_svc));
 
             loop {
                 tokio::select! {
