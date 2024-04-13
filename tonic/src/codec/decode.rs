@@ -283,11 +283,9 @@ impl StreamingInner {
 
     fn response(&mut self) -> Result<(), Status> {
         if let Direction::Response(status) = self.direction {
-            if let Some(trailers) = self.trailers.take() {
-                if let Err(e) = crate::status::infer_grpc_status(Some(&trailers), status) {
-                    if let Some(e) = e {
-                        return Err(e);
-                    }
+            if let Err(e) = crate::status::infer_grpc_status(self.trailers.as_ref(), status) {
+                if let Some(e) = e {
+                    return Err(e);
                 }
             }
         }
@@ -390,9 +388,6 @@ impl<T> Stream for Streaming<T> {
                 return Poll::Ready(None);
             }
 
-            // FIXME: implement the ability to poll trailers when we _know_ that
-            // the consumer of this stream will only poll for the first message.
-            // This means we skip the poll_trailers step.
             if let Some(item) = self.decode_chunk()? {
                 return Poll::Ready(Some(Ok(item)));
             }
