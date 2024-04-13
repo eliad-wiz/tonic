@@ -47,6 +47,7 @@ transport = [
   "dep:h2",
   "dep:hyper",
   "dep:tokio",
+  "tokio?/macros",
   "tokio?/net",
   "tokio?/time",
   "dep:hyper-util",
