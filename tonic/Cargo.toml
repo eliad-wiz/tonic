@@ -33,8 +33,9 @@ tls = [
   "transport",
   "dep:tokio-rustls",
   "dep:rustls",
-  "tokio/rt",
-  "tokio/macros",
+  "dep:tokio",
+  "tokio?/rt",
+  "tokio?/macros",
 ]
 tls-roots = ["tls-roots-common", "dep:rustls-native-certs"]
 tls-roots-common = ["tls"]
