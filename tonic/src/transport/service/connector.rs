@@ -3,6 +3,8 @@ use std::task::{Context, Poll};
 
 use http::Uri;
 use hyper::rt;
+
+#[cfg(feature = "tls")]
 use hyper_util::rt::TokioIo;
 use tower_service::Service;
 
