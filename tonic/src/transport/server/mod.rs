@@ -133,7 +133,7 @@ impl Default for Server<Identity> {
     }
 }
 
-/// A stack based `Service` router.
+/// A stack based [`Service`] router.
 #[derive(Debug)]
 pub struct Router<L = Identity> {
     server: Server<L>,

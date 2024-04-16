@@ -1,7 +1,7 @@
 //! Batteries included server and client.
 //!
 //! This module provides a set of batteries included, fully featured and
-//! fast set of HTTP/2 server and client's. These components each provide a or
+//! fast set of HTTP/2 server and client's. These components each provide a
 //! `rustls` tls backend when the respective feature flag is enabled, and
 //! provides builders to configure transport behavior.
 //!
