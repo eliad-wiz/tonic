@@ -82,8 +82,8 @@ const DEFAULT_HTTP2_KEEPALIVE_TIMEOUT_SECS: u64 = 20;
 
 /// A default batteries included `transport` server.
 ///
-/// This is a wrapper around [`hyper::Server`] and provides an easy builder
-/// pattern style builder [`Server`]. This builder exposes easy configuration parameters
+/// This provides an easy builder pattern style builder [`Server`] on top of
+/// `hyper` connections. This builder exposes easy configuration parameters
 /// for providing a fully featured http2 based gRPC server. This should provide
 /// a very good out of the box http2 server for use with tonic but is also a
 /// reference implementation that should be a good starting point for anyone
