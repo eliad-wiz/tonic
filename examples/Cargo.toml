@@ -302,6 +302,7 @@ grpc-web = [
     "dep:bytes",
     "dep:http",
     "dep:hyper",
+    "dep:hyper-util",
     "dep:tracing-subscriber",
     "dep:tower",
 ]
@@ -315,15 +316,16 @@ tracing = ["dep:tracing", "dep:tracing-subscriber"]
 #     "dep:warp",
 # ]
 # hyper-warp-multiplex = ["hyper-warp"]
-uds = ["tokio-stream/net", "dep:tower", "dep:hyper"]
+uds = ["tokio-stream/net", "dep:tower", "dep:hyper", "dep:hyper-util"]
 streaming = ["tokio-stream", "dep:h2"]
 mock = ["tokio-stream", "dep:tower", "dep:hyper-util"]
-tower = ["dep:hyper", "dep:tower", "dep:http"]
+tower = ["dep:hyper", "dep:hyper-util", "dep:tower", "dep:http"]
 json-codec = ["dep:serde", "dep:serde_json", "dep:bytes"]
 compression = ["tonic/gzip"]
 tls = ["tonic/tls"]
 tls-rustls = [
     "dep:hyper",
+    "dep:hyper-util",
     "dep:hyper-rustls",
     "dep:tower",
     "tower-http/util",
